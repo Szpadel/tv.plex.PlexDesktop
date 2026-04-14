@@ -54,7 +54,7 @@ jobs:
 
           asset_tag="$(printf '%s' "$release_tag" | tr -cs 'A-Za-z0-9._-' '-')"
           bundle_name="tv.plex.PlexDesktop-unofficial-${asset_tag}.flatpak"
-          output_delimiter="$(python3 -c 'import uuid; print(\"__GITHUB_OUTPUT_\" + uuid.uuid4().hex + \"__\")')"
+          output_delimiter="$(python3 -c 'import uuid; print("__GITHUB_OUTPUT_" + uuid.uuid4().hex + "__")')"
 
           {
             echo "release_tag<<${output_delimiter}"
@@ -104,7 +104,7 @@ jobs:
 
       - name: Upload workflow artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unofficial-flatpak-${{ steps.release_meta.outputs.asset_tag }}
           if-no-files-found: warn
