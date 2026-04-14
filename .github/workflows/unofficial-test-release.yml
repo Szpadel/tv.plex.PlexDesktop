@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional prerelease tag. Defaults to test-YYYYMMDD-run<RUN_NUMBER>.
+        description: Optional prerelease tag. Defaults to plex-<version>-<next>.
         required: false
         type: string
       release_name:
@@ -35,26 +35,68 @@ jobs:
         id: release_meta
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_RELEASE_NAME: ${{ github.event.inputs.release_name || '' }}
           INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag || '' }}
+          PLEX_PACKAGE_URL: ${{ env.PLEX_PACKAGE_URL }}
         run: |
           set -euo pipefail
+
+          plex_version="$(python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          package_url = os.environ.get("PLEX_PACKAGE_URL", "")
+          package_match = re.search(r'plex-desktop-([0-9]+(?:\.[0-9]+){3})-', package_url)
+          if package_match:
+              print(package_match.group(1))
+              raise SystemExit(0)
+
+          manifest_text = Path("tv.plex.PlexDesktop.yml").read_text()
+          manifest_match = re.search(
+              r'https://artifacts\.plex\.tv/plex-desktop-stable/([0-9]+(?:\.[0-9]+){3})(?:-[^/]+)?/linux/',
+              manifest_text,
+          )
+          if not manifest_match:
+              raise SystemExit("failed to determine Plex version")
+
+          print(manifest_match.group(1))
+          PY
+          )"
 
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             release_tag="$GITHUB_REF_NAME"
           elif [[ -n "$INPUT_RELEASE_TAG" ]]; then
             release_tag="$INPUT_RELEASE_TAG"
           else
-            branch_name="${GITHUB_REF_NAME:-manual}"
-            branch_slug="$(printf '%s' "$branch_name" | tr -cs 'A-Za-z0-9._-' '-')"
-            branch_slug="${branch_slug#-}"
-            branch_slug="${branch_slug%-}"
+            base_release_tag="plex-${plex_version}"
+            next_release_number=1
 
-            if [[ -z "$branch_slug" ]]; then
-              branch_slug="branch"
+            if command -v gh >/dev/null 2>&1 && [[ -n "${GH_TOKEN:-}" ]] && [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+              existing_refs="$(
+                gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${base_release_tag}-" \
+                  --jq '.[].ref' \
+                  2>/dev/null || true
+              )"
+
+              while IFS= read -r ref; do
+                [[ -n "$ref" ]] || continue
+                tag_name="${ref#refs/tags/}"
+                prefix="${base_release_tag}-"
+
+                if [[ "$tag_name" != "${prefix}"* ]]; then
+                  continue
+                fi
+
+                suffix="${tag_name#$prefix}"
+                if [[ "$suffix" =~ ^[0-9]+$ ]] && (( suffix >= next_release_number )); then
+                  next_release_number=$((suffix + 1))
+                fi
+              done <<< "$existing_refs"
             fi
 
-            release_tag="test-${branch_slug}-$(date -u +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+            release_tag="${base_release_tag}-${next_release_number}"
           fi
 
           if [[ -n "$INPUT_RELEASE_NAME" ]]; then
@@ -70,6 +112,9 @@ jobs:
           {
             echo "release_tag<<${output_delimiter}"
             echo "$release_tag"
+            echo "${output_delimiter}"
+            echo "plex_version<<${output_delimiter}"
+            echo "$plex_version"
             echo "${output_delimiter}"
             echo "release_name<<${output_delimiter}"
             echo "$release_name"
