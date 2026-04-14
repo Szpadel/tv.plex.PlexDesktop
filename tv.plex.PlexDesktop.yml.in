@@ -103,16 +103,125 @@ modules:
       - sed -i 's/"\$BASE_DIR"\/bin\/Plex/"\$BASE_DIR"\/bin\/plex-bin/g' /app/Plex.sh
       - mv /app/bin/Plex /app/bin/plex-bin
       - mv /app/Plex.sh /app/bin/Plex
+      - |
+        python3 - <<'PY'
+        from pathlib import Path
+
+        path = Path('/app/bin/Plex')
+        text = path.read_text()
+        old = 'LD_PRELOAD="$BASE_DIR"/lib/exec.so '
+        new = 'LD_PRELOAD="$BASE_DIR"/lib/libplexffmpegcompat.so:"$BASE_DIR"/lib/exec.so${LD_PRELOAD:+:$LD_PRELOAD} '
+        if old not in text:
+          raise SystemExit('launcher preload line not found')
+        path.write_text(text.replace(old, new, 1))
+        PY
     cleanup:
       - /lib/dri
       - /lib/libEGL.so*
       - /lib/libdrm.so*
       - /lib/libdrm_*.so*
       - /lib/libpciaccess.so*
-      - /lib/libswresample.so*
       - /lib/libva.so*
       - /lib/libva-*.so*
     sources:
       - type: archive
         url: https://artifacts.plex.tv/plex-desktop-stable/@FULL_VERSION@/linux/Plex-@FULL_VERSION@-linux-x86_64.tar.bz2
         sha256: @TARBALL_SHA256@
+
+  - name: plex-ffmpeg-compat
+    buildsystem: simple
+    build-commands:
+      - cc -fPIC -shared plex-ffmpeg-compat.c -Wl,-soname,libplexffmpegcompat.so -Wl,--version-script=plex-ffmpeg-compat.map -o libplexffmpegcompat.so
+      - install -Dm755 libplexffmpegcompat.so /app/lib/libplexffmpegcompat.so
+    sources:
+      - type: file
+        path: plex-ffmpeg-compat.c
+      - type: file
+        path: plex-ffmpeg-compat.map
+
+  - name: plex-media-stack-swap
+    buildsystem: simple
+    build-commands:
+      - rm -f /app/lib/libmpv.so*
+      - rm -f /app/lib/libavcodec.so* /app/lib/libavfilter.so* /app/lib/libavformat.so* /app/lib/libavutil.so*
+      - rm -f /app/lib/libswresample.so* /app/lib/libswscale.so*
+      - rm -f /app/lib/libass.so* /app/lib/libdav1d.so* /app/lib/libplacebo.so*
+
+  # Experimental upstream media stack swap. These modules intentionally
+  # override Plex's bundled libav* and libmpv shared libraries to probe
+  # whether stock FFmpeg/libmpv can unlock AV1 VA-API in the Flatpak build.
+  - name: dav1d
+    buildsystem: meson
+    config-opts:
+      - -Ddefault_library=shared
+      - -Denable_tools=false
+      - -Denable_tests=false
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/dav1d.git
+        tag: 1.5.3
+        commit: 0664c109d1b85503bc32bf89920f951cacf5702e
+
+  - name: libass
+    buildsystem: autotools
+    config-opts:
+      - --enable-shared
+      - --disable-static
+    sources:
+      - type: git
+        url: https://github.com/libass/libass.git
+        tag: 0.17.3
+        commit: 01ae90a8028545704848fcb19b680ccb3964948d
+
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - --libdir=lib
+      - -Ddemos=false
+      - -Dtests=false
+      - -Dglslang=disabled
+      - -Dvulkan=disabled
+      - -Dshaderc=disabled
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/libplacebo.git
+        tag: v7.349.0
+        commit: 9c4b6bbd7a1e223ffdd61affc4e5d463d42d4345
+
+  - name: ffmpeg
+    buildsystem: simple
+    build-commands:
+      - ./configure --prefix=/app --libdir=/app/lib --disable-static --enable-shared --disable-programs --disable-doc --disable-debug --enable-openssl --enable-libdav1d --enable-libdrm --enable-vaapi --enable-libxml2
+      - make -j${FLATPAK_BUILDER_N_JOBS}
+      - make install
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-5.1.8.tar.xz
+        sha256: 56d4daf10c17330a45c8fe11bc260997677ca2432d3d5951dbeb5515c26028cb
+
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - -Dlibmpv=true
+      - -Dcplayer=false
+      - -Dbuild-date=false
+      - -Dmanpage-build=disabled
+      - -Dtests=false
+      - -Dalsa=enabled
+      - -Dpulse=enabled
+      - -Dvaapi=enabled
+      - -Dvulkan=disabled
+      - -Dcuda-hwaccel=disabled
+      - -Djavascript=disabled
+      - -Dlibarchive=disabled
+      - -Drubberband=disabled
+      - -Dcdda=disabled
+      - -Ddvbin=disabled
+      - -Ddvdnav=disabled
+      - -Dlibbluray=disabled
+      - -Dsdl2=disabled
+    sources:
+      - type: git
+        url: https://github.com/mpv-player/mpv.git
+        tag: v0.38.0
+        commit: 94a2164248b434e4bc89224901ed0250fea571de

@@ -1,0 +1,173 @@
+name: Build Unofficial Test Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional prerelease tag. Defaults to test-YYYYMMDD-run<RUN_NUMBER>.
+        required: false
+        type: string
+      release_name:
+        description: Optional GitHub release title.
+        required: false
+        type: string
+  push:
+    tags:
+      - test-*
+
+permissions:
+  contents: write
+
+env:
+  PLEX_PACKAGE_URL: https://repo.jjgaming.net/jjgaming-aur/x86_64/plex-desktop-1.112.0.359-1-x86_64.pkg.tar.zst
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Determine release metadata
+        id: release_meta
+        shell: bash
+        env:
+          INPUT_RELEASE_NAME: ${{ github.event.inputs.release_name || '' }}
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag || '' }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          elif [[ -n "$INPUT_RELEASE_TAG" ]]; then
+            release_tag="$INPUT_RELEASE_TAG"
+          else
+            release_tag="test-$(date -u +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+          fi
+
+          if [[ -n "$INPUT_RELEASE_NAME" ]]; then
+            release_name="$INPUT_RELEASE_NAME"
+          else
+            release_name="Unofficial Plex Desktop test build ${release_tag}"
+          fi
+
+          asset_tag="$(printf '%s' "$release_tag" | tr -cs 'A-Za-z0-9._-' '-')"
+          bundle_name="tv.plex.PlexDesktop-unofficial-${asset_tag}.flatpak"
+          output_delimiter="$(python3 -c 'import uuid; print(f\"__GITHUB_OUTPUT_{uuid.uuid4().hex}__\")')"
+
+          {
+            echo "release_tag<<${output_delimiter}"
+            echo "$release_tag"
+            echo "${output_delimiter}"
+            echo "release_name<<${output_delimiter}"
+            echo "$release_name"
+            echo "${output_delimiter}"
+            echo "asset_tag<<${output_delimiter}"
+            echo "$asset_tag"
+            echo "${output_delimiter}"
+            echo "bundle_name<<${output_delimiter}"
+            echo "$bundle_name"
+            echo "${output_delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder git-lfs zstd
+          git lfs install
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
+
+      - name: Build unofficial Flatpak bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p flatpak/logs
+          set -o pipefail
+          bash scripts/build-unofficial-release.sh \
+            --release-tag "${{ steps.release_meta.outputs.release_tag }}" \
+            --output-dir flatpak/dist \
+            --work-dir flatpak/work \
+            --plex-package-url "$PLEX_PACKAGE_URL" \
+            2>&1 | tee flatpak/logs/build.log
+
+      - name: Smoke test startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          bash scripts/smoke-test-build-dir.sh flatpak/work/build-dir \
+            2>&1 | tee flatpak/logs/smoke-test.log
+
+      - name: Upload workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unofficial-flatpak-${{ steps.release_meta.outputs.asset_tag }}
+          if-no-files-found: warn
+          path: |
+            flatpak/dist/**
+            flatpak/logs/**
+            flatpak/work/tv.plex.PlexDesktop.local.yml
+
+      - name: Generate release notes
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > flatpak/dist/release-notes.md <<EOF
+          This is an unofficial Plex Desktop test build that packages the experimental upstream \`mpv + FFmpeg\` media stack swap for easier Linux playback testing.
+
+          Install:
+          \`\`\`bash
+          flatpak install --user --reinstall ./${{ steps.release_meta.outputs.bundle_name }}
+          flatpak run tv.plex.PlexDesktop
+          \`\`\`
+
+          Important:
+          - This build uses the official Flatpak app ID \`tv.plex.PlexDesktop\`
+          - Installing it replaces the official Plex Desktop Flatpak on the test machine
+          - It reuses the same application data under \`~/.var/app/tv.plex.PlexDesktop\`
+
+          Revert to the official build:
+          \`\`\`bash
+          flatpak install --user --reinstall flathub tv.plex.PlexDesktop
+          \`\`\`
+
+          Built from commit \`${GITHUB_SHA}\`.
+          Plex package source: \`${PLEX_PACKAGE_URL}\`
+          EOF
+
+      - name: Publish GitHub prerelease
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release_meta.outputs.release_tag }}"
+          title="${{ steps.release_meta.outputs.release_name }}"
+          assets=(
+            "flatpak/dist/${{ steps.release_meta.outputs.bundle_name }}"
+            "flatpak/dist/SHA256SUMS.txt"
+            "flatpak/dist/build-metadata.txt"
+          )
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --title "$title" \
+              --notes-file flatpak/dist/release-notes.md \
+              --prerelease
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --title "$title" \
+              --notes-file flatpak/dist/release-notes.md \
+              --prerelease \
+              --latest=false \
+              --target "$GITHUB_SHA"
+          fi

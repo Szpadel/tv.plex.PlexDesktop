@@ -1,0 +1,12 @@
+LIBAVUTIL_57 {
+  global:
+    av_set_needs_rescan;
+    av_set_extlibs_path;
+  local:
+    *;
+};
+
+LIBAVFORMAT_59 {
+  global:
+    avformat_set_decryption_callbacks;
+} LIBAVUTIL_57;
